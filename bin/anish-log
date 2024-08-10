@@ -1,0 +1,76 @@
+#!/usr/bin/env ruby
+
+$LOAD_PATH << File.expand_path("../../lib", __FILE__)
+require "digest"
+require "time"
+require "anish/object"
+
+ANISH_DIRECTORY = "#{Dir.pwd}/.anish".freeze
+HEAD_PATH = "#{ANISH_DIRECTORY}/HEAD"
+INDEX_PATH = "#{ANISH_DIRECTORY}/index"
+COMMIT_MESSAGE_TEMPLATE = <<-TXT
+# Title
+#
+# Body
+TXT
+
+def read_current_branch
+  current_branch_ref = File.read(HEAD_PATH).strip.split.last
+  current_branch_ref.split('/').last
+end
+
+def read_current_commit
+  current_branch = File.read(HEAD_PATH).strip.split.last
+  current_commit_path = "#{ANISH_DIRECTORY}/#{current_branch}"
+  File.exist?(current_commit_path) ? File.read(current_commit_path).strip : nil
+end
+
+def read_commit(sha)
+  commit_path = "#{ANISH_DIRECTORY}/objects/#{sha[0, 2]}/#{sha[2..-1]}"
+  return nil unless File.exist?(commit_path)
+  File.read(commit_path)
+end
+
+def extract_commit_info(commit_content)
+  lines = commit_content.lines
+  tree = lines[0].split[1]
+  parent = lines[1].split[1] if lines[1].start_with?("parent")
+  author = lines.find { |line| line.start_with?("author") }.split[1]
+  message = lines[lines.index("\n") + 1..-1].join.strip
+  { tree: tree, parent: parent, author: author, message: message }
+end
+
+def traverse_commits(start_commit)
+  commits = []
+  current_commit = start_commit
+  while current_commit
+    commit_content = read_commit(current_commit)
+    commit_info = extract_commit_info(commit_content)
+    commits << { sha: current_commit, message: commit_info[:message] }
+    current_commit = commit_info[:parent]
+  end
+  commits
+end
+
+def print_commit_log(commits, current_commit)
+  commits.each do |commit|
+    sha_prefix = commit[:sha][0, 7]
+    message = commit[:message]
+    if commit[:sha] == current_commit
+      puts "\e[32m* #{sha_prefix} #{message}\e[0m"
+    else
+      puts "  #{sha_prefix} #{message}"
+    end
+  end
+end
+
+# Main execution starts here
+
+current_commit = read_current_commit
+unless current_commit
+  $stderr.puts "No commits found."
+  exit 1
+end
+
+commits = traverse_commits(current_commit)
+print_commit_log(commits, current_commit)

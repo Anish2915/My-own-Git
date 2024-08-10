@@ -1,0 +1,148 @@
+#!/usr/bin/env ruby
+
+require 'fileutils'
+require 'digest'
+require 'zlib'
+
+command, branch_name = ARGV
+
+ANISH_DIRECTORY = ".anish".freeze
+HEAD_PATH = "#{ANISH_DIRECTORY}/HEAD"
+BRANCHES_DIRECTORY = "#{ANISH_DIRECTORY}/refs/heads".freeze
+OBJECTS_DIRECTORY = "#{ANISH_DIRECTORY}/objects".freeze
+
+def create_branch(branch_name)
+  branch_path = "#{BRANCHES_DIRECTORY}/#{branch_name}"
+  if File.exist?(branch_path)
+    $stderr.puts "Branch '#{branch_name}' already exists."
+    exit 1
+  end
+
+  head_content = File.read(HEAD_PATH).strip
+  if head_content.start_with?("ref:")
+    ref_path = head_content.split.last
+    ref_full_path = "#{ANISH_DIRECTORY}/#{ref_path}"
+    current_commit = File.read(ref_full_path).strip
+  else
+    current_commit = head_content
+  end
+
+  File.open(branch_path, "w") { |file| file.write(current_commit) }
+  puts "Branch '#{branch_name}' created."
+end
+
+def switch_branch(branch_name)
+  branch_path = "#{BRANCHES_DIRECTORY}/#{branch_name}"
+  unless File.exist?(branch_path)
+    $stderr.puts "Branch '#{branch_name}' does not exist."
+    exit 1
+  end
+
+  File.open(HEAD_PATH, "w") { |file| file.write("ref: refs/heads/#{branch_name}") }
+  puts "Switched to branch '#{branch_name}'."
+
+  commit_sha = File.read(branch_path).strip
+  clear_working_directory
+  populate_working_directory(commit_sha)
+end
+
+def clear_working_directory
+  Dir.glob('*', File::FNM_DOTMATCH).each do |file|
+    next if file == '.' || file == '..' || file == ANISH_DIRECTORY
+    FileUtils.rm_rf(file)
+  end
+end
+
+def populate_working_directory(commit_sha)
+  commit_content = read_object(commit_sha)
+  commit_lines = commit_content.strip.split("\n")
+  tree_sha = commit_lines.find { |line| line.start_with?("tree ") }.split.last
+  extract_tree(tree_sha)
+end
+
+def extract_tree(tree_sha, base_path = '.')
+  tree_content = read_object(tree_sha)
+  tree_content.strip.split("\n").each do |line|
+    type, sha, name = line.split(' ', 3)
+    path = File.join(base_path, name.strip)
+
+    # Validate and sanitize the path
+    if path.include?("..") || path.include?("\0") || path.strip.empty?
+      $stderr.puts "Invalid path detected: #{path.inspect}"
+      next
+    end
+
+    begin
+      case type
+      when "blob"
+        blob_content = read_object(sha)
+
+        dir_path = File.dirname(path)
+        FileUtils.mkdir_p(dir_path) unless File.directory?(dir_path)
+
+        File.open(path, "wb") do |file|
+          file.write(blob_content)
+        end
+      when "tree"
+        FileUtils.mkdir_p(path) unless File.directory?(path)
+        extract_tree(sha, path)
+      else
+        $stderr.puts "Unknown type detected: #{type}"
+      end
+    rescue StandardError => e
+      $stderr.puts "Error processing #{path.inspect}: #{e.message}"
+    end
+  end
+end
+
+def read_object(sha)
+  directory = sha[0..1]
+  filename = sha[2..-1]
+  object_path = File.join(OBJECTS_DIRECTORY, directory, filename)
+  unless File.exist?(object_path)
+    $stderr.puts "Object #{sha} not found."
+    exit 1
+  end
+
+  file_contents = File.binread(object_path) 
+  
+  begin
+    Zlib::Inflate.inflate(file_contents)
+  rescue Zlib::DataError
+    file_contents
+  end
+end
+
+
+def list_branches
+  current_branch = File.read(HEAD_PATH).strip.split("/").last
+  branches = Dir.entries(BRANCHES_DIRECTORY).select { |entry| File.file?(File.join(BRANCHES_DIRECTORY, entry)) }
+
+  branches.each do |branch|
+    if branch == current_branch
+      puts "\e[32m* #{branch}\e[0m"
+    else
+      puts "  #{branch}"
+    end
+  end
+end
+
+case command
+when "create"
+  if branch_name.nil?
+    $stderr.puts "Usage: anish branch create <branch-name>"
+    exit 1
+  end
+  create_branch(branch_name)
+when "switch"
+  if branch_name.nil?
+    $stderr.puts "Usage: anish branch switch <branch-name>"
+    exit 1
+  end
+  switch_branch(branch_name)
+when nil
+  list_branches
+else
+  $stderr.puts "Usage: anish branch <create|switch> <branch-name>"
+  exit 1
+end

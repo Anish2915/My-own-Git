@@ -1,0 +1,127 @@
+#!/usr/bin/env ruby
+
+$LOAD_PATH << File.expand_path("../../lib", __FILE__)
+require "digest"
+require "time"
+require "anish/object"
+
+ANISH_DIRECTORY = "#{Dir.pwd}/.anish".freeze
+INDEX_PATH = "#{ANISH_DIRECTORY}/index"
+COMMIT_MESSAGE_TEMPLATE = "default".freeze
+
+def initialize_commit_message_file(path, template)
+  File.open(path, 'w') do |file|
+    file.write(template)
+  end
+end
+
+def index_files
+  File.open(INDEX_PATH).each_line
+end
+
+def index_tree
+  index_files.each_with_object({}) do |line, obj|
+    line = line.strip  
+    parts = line.split(' ', 2) 
+    sha = parts[0]
+    path = parts[1]
+
+    if path.nil?
+      $stderr.puts "Path is nil for line: #{line.inspect}"
+      next
+    end
+
+    segments = path.split("/")
+    segments.reduce(obj) do |memo, s|
+      if s == segments.last
+        memo[segments.last] = sha
+      else
+        memo[s] ||= {}
+        memo = memo[s] 
+      end
+      memo
+    end
+  end
+end  
+
+def build_tree(name, tree)
+  sha = Digest::SHA1.hexdigest(Time.now.iso8601 + name)
+  object = Anish::Object.new(sha)
+
+  object.write do |file|
+    tree.each do |key, value|
+      if value.is_a? Hash
+        dir_sha = build_tree(key, value)
+        file.puts "tree #{dir_sha} #{key}"
+      else
+        file.puts "blob #{value} #{key}"
+      end
+    end
+  end
+
+  sha
+end
+
+def build_commit(tree:, parent_commit: nil, message: nil)
+  commit_message_path = "#{ANISH_DIRECTORY}/COMMIT_EDITMSG"
+  
+  if message.nil?
+    initialize_commit_message_file(commit_message_path, COMMIT_MESSAGE_TEMPLATE)
+    # `$VISUAL #{commit_message_path} >/dev/tty`
+    message = File.read(commit_message_path)
+  end
+  
+  committer = "user"
+  sha = Digest::SHA1.hexdigest(Time.now.iso8601 + committer)
+  object = Anish::Object.new(sha)
+
+  object.write do |file|
+    file.puts "tree #{tree}"
+    file.puts "parent #{parent_commit}" unless parent_commit.nil?
+    file.puts "author #{committer}"
+    file.puts
+    file.puts message
+  end
+
+  sha
+end
+
+def update_ref(commit_sha:)
+  current_branch = File.read("#{ANISH_DIRECTORY}/HEAD").strip.split.last
+
+  File.open("#{ANISH_DIRECTORY}/#{current_branch}", "w") do |file|
+    file.print commit_sha
+  end
+end
+
+def get_parent_commit
+  current_branch_path = "#{ANISH_DIRECTORY}/#{File.read("#{ANISH_DIRECTORY}/HEAD").strip.split.last}"
+  File.exist?(current_branch_path) ? File.read(current_branch_path).strip : nil
+end
+
+def clear_index
+  File.open(INDEX_PATH, "w") do |file|
+    file.write("") 
+  end
+end
+
+# Main execution starts here
+
+if index_files.count == 0
+  $stderr.puts "Nothing to commit"
+  exit 1
+end
+
+# Parse command-line arguments for the commit message
+commit_message = nil
+if ARGV[0] == "-m" && ARGV[1]
+  commit_message = ARGV[1]
+end
+
+index_structure = index_tree
+
+root_sha = build_tree("root", index_structure)
+parent_commit = get_parent_commit
+commit_sha = build_commit(tree: root_sha, parent_commit: parent_commit, message: commit_message)
+update_ref(commit_sha: commit_sha)
+clear_index

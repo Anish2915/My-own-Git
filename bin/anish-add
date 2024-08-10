@@ -1,0 +1,76 @@
+#!/usr/bin/env ruby
+
+require "digest"
+require "zlib"
+require "fileutils"
+require "pathname"
+
+ANISH_DIRECTORY = ".anish".freeze
+OBJECTS_DIRECTORY = "#{ANISH_DIRECTORY}/objects".freeze
+INDEX_PATH = "#{ANISH_DIRECTORY}/index"
+
+def add_file(path)
+  # Convert path to an absolute path
+  path = File.expand_path(path)
+
+  # Read file contents in binary mode
+  file_contents = File.binread(path)
+  sha = Digest::SHA1.hexdigest(file_contents)
+  
+  # Deflate file contents for storage
+  blob = Zlib::Deflate.deflate(file_contents, Zlib::DEFAULT_COMPRESSION)
+  
+  # Determine object directory and file path
+  object_directory = "#{OBJECTS_DIRECTORY}/#{sha[0..1]}"
+  FileUtils.mkdir_p(object_directory)
+  blob_path = "#{object_directory}/#{sha[2..-1]}"
+
+  # Write the deflated data to the object store in binary mode
+  File.open(blob_path, "wb") do |file|
+    file.write(blob)
+  end
+
+  # Write the sha and relative path to the index file
+  relative_path = Pathname.new(path).relative_path_from(Pathname.new(Dir.pwd)).to_s
+  File.open(INDEX_PATH, "a") do |file|
+    file.puts "#{sha} #{relative_path}"
+  end
+end
+
+
+def add_directory(directory)
+  Dir.glob("#{directory}/**/*").each do |path|
+    next if path == directory || path.include?("#{ANISH_DIRECTORY}/")
+
+    if File.file?(path)
+      add_file(path)
+    end
+  end
+end
+
+def add_paths(paths)
+  paths.each do |path|
+    if File.directory?(path)
+      add_directory(path)
+    elsif File.file?(path)
+      add_file(path)
+    else
+      $stderr.puts "Path not found: #{path}"
+    end
+  end
+end
+
+if !Dir.exist?(ANISH_DIRECTORY)
+  $stderr.puts "Not an ANISH project"
+  exit 1
+end
+
+paths = ARGV
+
+if paths.empty?
+  $stderr.puts "No paths specified"
+  exit 1
+end
+
+add_paths(paths)
+puts "Files Added Successfully"

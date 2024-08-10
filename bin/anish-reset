@@ -1,0 +1,186 @@
+#!/usr/bin/env ruby
+
+require 'fileutils'
+require 'digest'
+require 'zlib'
+
+ANISH_DIRECTORY = ".anish".freeze
+HEAD_PATH = "#{ANISH_DIRECTORY}/HEAD"
+BRANCHES_DIRECTORY = "#{ANISH_DIRECTORY}/refs/heads".freeze
+OBJECTS_DIRECTORY = "#{ANISH_DIRECTORY}/objects".freeze
+
+def read_current_branch
+  current_branch_ref = File.read(HEAD_PATH).strip.split.last
+  current_branch_ref.split('/').last
+end
+
+def read_current_commit
+  current_branch = File.read(HEAD_PATH).strip.split.last
+  current_commit_path = "#{ANISH_DIRECTORY}/#{current_branch}"
+  File.exist?(current_commit_path) ? File.read(current_commit_path).strip : nil
+end
+
+def read_commit(sha)
+  commit_path = "#{ANISH_DIRECTORY}/objects/#{sha[0, 2]}/#{sha[2..-1]}"
+  return nil unless File.exist?(commit_path)
+  File.read(commit_path)
+end
+
+def extract_commit_info(commit_content)
+  lines = commit_content.lines
+  tree = lines[0].split[1]
+  parent = lines[1].split[1] if lines[1].start_with?("parent")
+  author = lines.find { |line| line.start_with?("author") }.split[1]
+  message = lines[lines.index("\n") + 1..-1].join.strip
+  { tree: tree, parent: parent, author: author, message: message }
+end
+
+def clear_working_directory
+  Dir.glob('*', File::FNM_DOTMATCH).each do |file|
+    next if file == '.' || file == '..' || file == ANISH_DIRECTORY
+    FileUtils.rm_rf(file)
+  end
+end
+
+def populate_working_directory(commit_sha)
+    commit_content = read_object(commit_sha)
+    commit_lines = commit_content.strip.split("\n")
+    tree_sha = commit_lines.find { |line| line.start_with?("tree ") }.split.last
+    extract_tree(tree_sha)
+  end
+  
+  def extract_tree(tree_sha, base_path = '.')
+    tree_content = read_object(tree_sha)
+    tree_content.strip.split("\n").each do |line|
+      type, sha, name = line.split(' ', 3)
+      path = File.join(base_path, name.strip)
+  
+      # Validate and sanitize the path
+      if path.include?("..") || path.include?("\0") || path.strip.empty?
+        $stderr.puts "Invalid path detected: #{path.inspect}"
+        next
+      end
+  
+      begin
+        case type
+        when "blob"
+          blob_content = read_object(sha)
+  
+          dir_path = File.dirname(path)
+          FileUtils.mkdir_p(dir_path) unless File.directory?(dir_path)
+  
+          File.open(path, "wb") do |file|
+            file.write(blob_content)
+          end
+        when "tree"
+          FileUtils.mkdir_p(path) unless File.directory?(path)
+          extract_tree(sha, path)
+        else
+          $stderr.puts "Unknown type detected: #{type}"
+        end
+      rescue StandardError => e
+        $stderr.puts "Error processing #{path.inspect}: #{e.message}"
+      end
+    end
+  end
+  
+  def read_object(sha)
+    directory = sha[0..1]
+    filename = sha[2..-1]
+    object_path = File.join(OBJECTS_DIRECTORY, directory, filename)
+    unless File.exist?(object_path)
+      $stderr.puts "Object #{sha} not found."
+      exit 1
+    end
+  
+    file_contents = File.binread(object_path) 
+    
+    begin
+      Zlib::Inflate.inflate(file_contents)
+    rescue Zlib::DataError
+      file_contents
+    end
+  end
+
+def reset_to_commit(commit_sha)
+    branch_name = read_current_branch
+    branch_path = "#{BRANCHES_DIRECTORY}/#{branch_name}"
+  
+    # Update the branch reference to point to the specified commit
+    File.open(branch_path, "w") { |file| file.write(commit_sha) }
+    File.open(HEAD_PATH, "w") { |file| file.write("ref: refs/heads/#{branch_name}") }
+  
+    commit_content = read_commit(commit_sha)
+    # puts " commit content #{commit_content}."
+    if commit_content.nil?
+      $stderr.puts "Commit #{commit_sha} not found."
+      exit 1
+    end
+  
+    clear_working_directory
+    populate_working_directory(commit_sha)
+    # puts "Reset to commit #{commit_sha}."
+  end
+  
+
+def reset_to_previous_commit
+  current_commit = read_current_commit
+#   puts "curr = #{current_commit}"
+  if current_commit.nil?
+    $stderr.puts "No commits found."
+    exit 1
+  end
+
+  commit_content = read_commit(current_commit)
+  commit_info = extract_commit_info(commit_content)
+#   puts "content = #{commit_info}"
+
+  if commit_info[:parent].nil?
+    $stderr.puts "No previous commit found."
+    exit 1
+  end
+
+  reset_to_commit(commit_info[:parent])
+end
+
+# Main execution starts here
+
+def traverse_commits(start_commit)
+    commits = []
+    current_commit = start_commit
+    while current_commit
+      commit_content = read_commit(current_commit)
+      break unless commit_content
+  
+      commit_info = extract_commit_info(commit_content)
+      commits << { sha: current_commit, message: commit_info[:message] }
+      current_commit = commit_info[:parent]
+    end
+    commits
+  end
+  
+
+def find_commit_sha(short_sha)
+    current_commit = read_current_commit
+    commits = traverse_commits(current_commit)
+  
+    commit = commits.find { |c| c[:sha].start_with?(short_sha) }
+    commit ? commit[:sha] : nil
+  end
+
+command = ARGV
+
+if command.first.nil?
+    reset_to_previous_commit
+  else
+    short_sha = command.first
+    full_sha = find_commit_sha(short_sha)
+  
+    if full_sha.nil?
+      $stderr.puts "No commit found with prefix #{short_sha}."
+      exit 1
+    end
+    puts " full sha #{full_sha}"
+  
+    reset_to_commit(full_sha)
+  end
